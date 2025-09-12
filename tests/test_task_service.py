@@ -43,7 +43,8 @@ class TestTaskService(unittest.TestCase):
         """测试TaskService基本任务创建功能"""
         task = self.task_service.create_task(
             url="https://example.com/address",
-            method="GET"
+            method="GET",
+            total_num=10  # 设置总数量大于0，使任务可以处于待处理状态
         )
         
         self.assertIsNotNone(task.id)
@@ -51,10 +52,10 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(task.method, "GET")
         self.assertIsNone(task.body)
         self.assertEqual(task.headers, {})
-        self.assertEqual(task.total_num, 0)
+        self.assertEqual(task.total_num, 10)  # 我们设置了总数量为10
         self.assertEqual(task.visited_num, 0)
-        self.assertEqual(task.status, "pending")
         self.assertEqual(task.timeout, 30)
+        self.assertTrue(task.is_pending)  # 初始状态为待处理
         self.assertEqual(task.retry_count, 0)
         self.assertIsNotNone(task.created_at)
         self.assertIsNotNone(task.updated_at)
@@ -81,7 +82,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(task.headers, headers_data)
         self.assertEqual(task.total_num, 100)
         self.assertEqual(task.timeout, 60)
-        self.assertEqual(task.status, "pending")
+        self.assertTrue(task.is_pending)  # 初始状态为待处理
     
     def test_create_task_url_validation(self) -> None:
         """测试任务创建时的URL验证"""
@@ -165,164 +166,165 @@ class TestTaskService(unittest.TestCase):
     def test_get_pending_task(self) -> None:
         """测试获取待处理任务功能"""
         # 创建多个待处理任务
-        task1 = self.task_service.create_task("https://example1.com", "GET")
-        task2 = self.task_service.create_task("https://example2.com", "POST")
-        task3 = self.task_service.create_task("https://example3.com", "PUT")
+        task1 = self.task_service.create_task("https://example1.com", "GET", total_num=10)
+        task2 = self.task_service.create_task("https://example2.com", "POST", total_num=10)
+        task3 = self.task_service.create_task("https://example3.com", "PUT", total_num=10)
         
-        # 获取第一个待处理任务
-        pending_task = self.task_service.get_pending_task()
-        self.assertIsNotNone(pending_task)
-        self.assertEqual(pending_task.id, task1.id)
-        self.assertEqual(pending_task.status, "running")  # 状态应该被更新为running
+        # 获取所有待处理任务（模拟批量处理）
+        all_tasks = []
+        while True:
+            task = self.task_service.get_pending_task()
+            if task is None:
+                break
+            all_tasks.append(task)
+            # 模拟任务处理：完成任务（设置访问数量等于总数量）
+            self.task_service.complete_task(task.id)
         
-        # 获取第二个待处理任务
-        pending_task2 = self.task_service.get_pending_task()
-        self.assertIsNotNone(pending_task2)
-        self.assertEqual(pending_task2.id, task2.id)
-        self.assertEqual(pending_task2.status, "running")
+        # 验证获取到所有任务
+        self.assertEqual(len(all_tasks), 3)
+        task_ids = [task.id for task in all_tasks]
+        self.assertIn(task1.id, task_ids)
+        self.assertIn(task2.id, task_ids)
+        self.assertIn(task3.id, task_ids)
         
-        # 获取第三个待处理任务
-        pending_task3 = self.task_service.get_pending_task()
-        self.assertIsNotNone(pending_task3)
-        self.assertEqual(pending_task3.id, task3.id)
-        self.assertEqual(pending_task3.status, "running")
-        
-        # 没有更多待处理任务
-        no_task = self.task_service.get_pending_task()
-        self.assertIsNone(no_task)
+        # 验证所有任务都已完成
+        for task in all_tasks:
+            self.assertTrue(task.is_completed)
+            self.assertEqual(task.visited_num, 10)  # 每个任务都应该完成
     
     def test_get_pending_task_with_mixed_status(self) -> None:
-        """测试混合状态下获取待处理任务"""
-        # 创建不同状态的任务
-        pending_task = self.task_service.create_task("https://pending.com", "GET")
-        running_task = self.task_service.create_task("https://running.com", "GET")
-        completed_task = self.task_service.create_task("https://completed.com", "GET")
-        failed_task = self.task_service.create_task("https://failed.com", "GET")
+        """测试混合完成状态下获取待处理任务"""
+        # 创建不同完成状态的任务
+        pending_task = self.task_service.create_task("https://pending.com", "GET", total_num=10)  # 未完成
+        running_task = self.task_service.create_task("https://running.com", "GET", total_num=10)  # 未完成
+        completed_task = self.task_service.create_task("https://completed.com", "GET", total_num=10)  # 将完成
+        failed_task = self.task_service.create_task("https://failed.com", "GET", total_num=10)  # 未完成
         
-        # 更新部分任务状态
-        running_task.status = "running"
-        db.session.commit()
-        
+        # 完成一个任务
         completed_task = self.task_service.complete_task(completed_task.id)
-        failed_task = self.task_service.fail_task(failed_task.id)
         
-        # 只应获取到待处理任务
+        # 只应获取到未完成任务（pending_task, running_task, failed_task）
         fetched_task = self.task_service.get_pending_task()
         self.assertIsNotNone(fetched_task)
-        self.assertEqual(fetched_task.id, pending_task.id)
-        self.assertEqual(fetched_task.status, "running")  # 状态被更新
+        self.assertIn(fetched_task.id, [pending_task.id, running_task.id, failed_task.id])
+        self.assertTrue(fetched_task.is_pending)  # 应该是待完成状态
     
-    def test_update_task_status_basic(self) -> None:
-        """测试基本任务状态更新功能"""
-        task = self.task_service.create_task("https://example.com", "GET")
+    def test_update_task_progress_basic(self) -> None:
+        """测试基本任务进度更新功能"""
+        task = self.task_service.create_task("https://example.com", "GET", total_num=10)
         
-        # 更新为运行中
-        updated_task = self.task_service.update_task_status(
+        # 更新已访问数量
+        updated_task = self.task_service.update_task_progress(
             task_id=task.id,
-            status="running"
+            visited_num=5
         )
-        self.assertEqual(updated_task.status, "running")
+        self.assertEqual(updated_task.visited_num, 5)
         self.assertEqual(updated_task.id, task.id)
+        self.assertFalse(updated_task.is_completed)
         
-        # 更新为已完成
-        updated_task = self.task_service.update_task_status(
-            task_id=task.id,
-            status="completed"
-        )
-        self.assertEqual(updated_task.status, "completed")
+        # 完成任务（设置访问数量等于总数量）
+        updated_task = self.task_service.complete_task(task.id)
+        self.assertEqual(updated_task.visited_num, 10)
+        self.assertTrue(updated_task.is_completed)
         
-        # 更新为失败
-        updated_task = self.task_service.update_task_status(
-            task_id=task.id,
-            status="failed"
-        )
-        self.assertEqual(updated_task.status, "failed")
+        # 重置任务（将访问数量重置为0）
+        updated_task = self.task_service.reset_task(task.id)
+        self.assertEqual(updated_task.visited_num, 0)
+        self.assertFalse(updated_task.is_completed)
     
-    def test_update_task_status_with_visited_num(self) -> None:
-        """测试更新任务状态时设置已访问数量"""
-        task = self.task_service.create_task("https://example.com", "GET")
+    def test_update_task_progress_with_visited_num(self) -> None:
+        """测试更新任务进度时设置已访问数量"""
+        task = self.task_service.create_task("https://example.com", "GET", total_num=100)
         
         # 直接设置已访问数量
-        updated_task = self.task_service.update_task_status(
+        updated_task = self.task_service.update_task_progress(
             task_id=task.id,
-            status="completed",
             visited_num=50
         )
-        self.assertEqual(updated_task.status, "completed")
         self.assertEqual(updated_task.visited_num, 50)
+        self.assertFalse(updated_task.is_completed)
+        
+        # 完成任务（设置访问数量等于总数量）
+        updated_task = self.task_service.complete_task(task.id, visited_num=100)
+        self.assertEqual(updated_task.visited_num, 100)
+        self.assertTrue(updated_task.is_completed)
         
         # 负数的已访问数量应该报错
         with self.assertRaises(ValueError) as cm:
-            self.task_service.update_task_status(
+            self.task_service.update_task_progress(
                 task_id=task.id,
-                status="running",
                 visited_num=-1
             )
         self.assertIn("已访问数量不能为负数", str(cm.exception))
     
-    def test_update_task_status_with_increment_visited(self) -> None:
-        """测试更新任务状态时增加已访问数量"""
-        task = self.task_service.create_task("https://example.com", "GET")
+    def test_update_task_progress_with_increment_visited(self) -> None:
+        """测试更新任务进度时增加已访问数量"""
+        task = self.task_service.create_task("https://example.com", "GET", total_num=20)
         
         # 增加已访问数量
-        updated_task = self.task_service.update_task_status(
+        updated_task = self.task_service.update_task_progress(
             task_id=task.id,
-            status="running",
             increment_visited=10
         )
         self.assertEqual(updated_task.visited_num, 10)
+        self.assertFalse(updated_task.is_completed)
         
         # 再次增加
-        updated_task = self.task_service.update_task_status(
+        updated_task = self.task_service.update_task_progress(
             task_id=task.id,
-            status="running",
             increment_visited=5
         )
         self.assertEqual(updated_task.visited_num, 15)
+        self.assertFalse(updated_task.is_completed)
+        
+        # 完成任务
+        updated_task = self.task_service.update_task_progress(
+            task_id=task.id,
+            increment_visited=5
+        )
+        self.assertEqual(updated_task.visited_num, 20)
+        self.assertTrue(updated_task.is_completed)
     
-    def test_update_task_status_with_increment_retry(self) -> None:
-        """测试更新任务状态时增加重试次数"""
+    def test_update_task_progress_with_increment_retry(self) -> None:
+        """测试更新任务进度时增加重试次数"""
         task = self.task_service.create_task("https://example.com", "GET")
         
         # 增加重试次数
-        updated_task = self.task_service.update_task_status(
+        updated_task = self.task_service.update_task_progress(
             task_id=task.id,
-            status="failed",
             increment_retry=True
         )
         self.assertEqual(updated_task.retry_count, 1)
-        self.assertEqual(updated_task.status, "failed")
         
         # 再次增加重试次数
-        updated_task = self.task_service.update_task_status(
+        updated_task = self.task_service.update_task_progress(
             task_id=task.id,
-            status="failed",
             increment_retry=True
         )
         self.assertEqual(updated_task.retry_count, 2)
     
-    def test_update_task_status_validation(self) -> None:
-        """测试任务状态更新的参数验证"""
+    def test_update_task_progress_validation(self) -> None:
+        """测试任务进度更新的参数验证"""
         task = self.task_service.create_task("https://example.com", "GET")
         
         # 测试无效的任务ID
         with self.assertRaises(ValueError) as cm:
-            self.task_service.update_task_status(task_id=0, status="running")
+            self.task_service.update_task_progress(task_id=0)
         self.assertIn("任务ID必须为正整数", str(cm.exception))
         
         with self.assertRaises(ValueError) as cm:
-            self.task_service.update_task_status(task_id=-1, status="running")
+            self.task_service.update_task_progress(task_id=-1)
         self.assertIn("任务ID必须为正整数", str(cm.exception))
-        
-        # 测试无效的状态
-        with self.assertRaises(ValueError) as cm:
-            self.task_service.update_task_status(task_id=task.id, status="invalid")
-        self.assertIn("无效的状态", str(cm.exception))
         
         # 测试不存在的任务
         with self.assertRaises(ValueError) as cm:
-            self.task_service.update_task_status(task_id=9999, status="running")
+            self.task_service.update_task_progress(task_id=9999)
         self.assertIn("任务不存在", str(cm.exception))
+        
+        # 测试负数的已访问数量
+        with self.assertRaises(ValueError) as cm:
+            self.task_service.update_task_progress(task_id=task.id, visited_num=-1)
+        self.assertIn("已访问数量不能为负数", str(cm.exception))
     
     def test_get_task_by_id(self) -> None:
         """测试根据ID获取任务功能"""
@@ -340,139 +342,124 @@ class TestTaskService(unittest.TestCase):
         non_existent_task = self.task_service.get_task_by_id(9999)
         self.assertIsNone(non_existent_task)
     
-    def test_get_tasks_by_status(self) -> None:
-        """测试根据状态获取任务列表功能"""
-        # 创建不同状态的任务
-        pending_tasks = []
+    def test_get_incomplete_and_completed_tasks(self) -> None:
+        """测试获取未完成和已完成任务列表功能"""
+        # 创建不同完成状态的任务
+        incomplete_tasks = []
         for i in range(3):
-            task = self.task_service.create_task(f"https://pending{i}.com", "GET")
-            pending_tasks.append(task)
-        
-        running_tasks = []
-        for i in range(2):
-            task = self.task_service.create_task(f"https://running{i}.com", "GET")
-            self.task_service.update_task_status(task.id, "running")
-            running_tasks.append(task)
+            task = self.task_service.create_task(f"https://incomplete{i}.com", "GET", total_num=10, visited_num=5)
+            incomplete_tasks.append(task)
         
         completed_tasks = []
         for i in range(2):
-            task = self.task_service.create_task(f"https://completed{i}.com", "GET")
+            task = self.task_service.create_task(f"https://completed{i}.com", "GET", total_num=10)
             self.task_service.complete_task(task.id)
             completed_tasks.append(task)
         
-        failed_tasks = []
-        for i in range(1):
-            task = self.task_service.create_task(f"https://failed{i}.com", "GET")
-            self.task_service.fail_task(task.id)
-            failed_tasks.append(task)
+        # 测试获取未完成任务
+        fetched_incomplete = self.task_service.get_incomplete_tasks()
+        self.assertEqual(len(fetched_incomplete), 3)
         
-        # 测试获取各种状态的任务
-        fetched_pending = self.task_service.get_tasks_by_status("pending")
-        self.assertEqual(len(fetched_pending), 3)
-        
-        fetched_running = self.task_service.get_tasks_by_status("running")
-        self.assertEqual(len(fetched_running), 2)
-        
-        fetched_completed = self.task_service.get_tasks_by_status("completed")
+        # 测试获取已完成任务
+        fetched_completed = self.task_service.get_completed_tasks()
         self.assertEqual(len(fetched_completed), 2)
         
-        fetched_failed = self.task_service.get_tasks_by_status("failed")
-        self.assertEqual(len(fetched_failed), 1)
-        
-        # 验证获取到的任务确实属于对应状态
-        for task in fetched_pending:
-            self.assertEqual(task.status, "pending")
-        for task in fetched_running:
-            self.assertEqual(task.status, "running")
+        # 验证获取到的任务确实属于对应完成状态
+        for task in fetched_incomplete:
+            self.assertTrue(task.is_pending)
+            self.assertFalse(task.is_completed)
         for task in fetched_completed:
-            self.assertEqual(task.status, "completed")
-        for task in fetched_failed:
-            self.assertEqual(task.status, "failed")
+            self.assertFalse(task.is_pending)
+            self.assertTrue(task.is_completed)
     
-    def test_get_tasks_by_status_validation(self) -> None:
-        """测试获取任务列表时的状态验证"""
-        with self.assertRaises(ValueError) as cm:
-            self.task_service.get_tasks_by_status("invalid_status")
-        self.assertIn("无效的状态", str(cm.exception))
+    # 移除 get_tasks_by_status_validation 测试，因为该方法已被移除
     
-    def test_get_running_tasks(self) -> None:
-        """测试获取运行中任务功能"""
-        # 创建运行中任务
-        task1 = self.task_service.create_task("https://running1.com", "GET")
-        task2 = self.task_service.create_task("https://running2.com", "GET")
+    def test_get_incomplete_tasks(self) -> None:
+        """测试获取未完成任务功能"""
+        # 创建未完成任务
+        task1 = self.task_service.create_task("https://incomplete1.com", "GET", total_num=10, visited_num=5)
+        task2 = self.task_service.create_task("https://incomplete2.com", "GET", total_num=10, visited_num=3)
+        task3 = self.task_service.create_task("https://incomplete3.com", "GET", total_num=10, visited_num=8)
         
-        self.task_service.update_task_status(task1.id, "running")
-        self.task_service.update_task_status(task2.id, "running")
+        # 创建已完成任务
+        completed_task1 = self.task_service.create_task("https://completed1.com", "GET", total_num=10)
+        self.task_service.complete_task(completed_task1.id)
         
-        # 创建非运行中任务
-        self.task_service.create_task("https://pending.com", "GET")
-        self.task_service.complete_task(self.task_service.create_task("https://completed.com", "GET").id)
+        # 创建 total_num 为 0 的任务（视为未完成）
+        zero_task = self.task_service.create_task("https://zero.com", "GET", total_num=0)
         
-        # 获取运行中任务
-        running_tasks = self.task_service.get_running_tasks()
-        self.assertEqual(len(running_tasks), 2)
-        for task in running_tasks:
-            self.assertEqual(task.status, "running")
+        # 获取未完成任务
+        incomplete_tasks = self.task_service.get_incomplete_tasks()
+        self.assertEqual(len(incomplete_tasks), 4)  # 3个部分完成 + 1个零总数
+        for task in incomplete_tasks:
+            if task.total_num > 0:
+                self.assertTrue(task.is_pending)
+                self.assertFalse(task.is_completed)
     
     def test_get_pending_tasks(self) -> None:
-        """测试获取待处理任务功能"""
-        # 创建待处理任务
-        task1 = self.task_service.create_task("https://pending1.com", "GET")
-        task2 = self.task_service.create_task("https://pending2.com", "GET")
-        task3 = self.task_service.create_task("https://pending3.com", "GET")
+        """测试获取待处理任务功能（别名方法）"""
+        # 创建未完成任务
+        task1 = self.task_service.create_task("https://pending1.com", "GET", total_num=10, visited_num=5)
+        task2 = self.task_service.create_task("https://pending2.com", "GET", total_num=10, visited_num=3)
+        task3 = self.task_service.create_task("https://pending3.com", "GET", total_num=10, visited_num=8)
         
-        # 创建非待处理任务
-        running_task = self.task_service.create_task("https://running.com", "GET")
-        self.task_service.update_task_status(running_task.id, "running")
+        # 创建已完成任务
+        completed_task = self.task_service.create_task("https://completed.com", "GET", total_num=10)
+        self.task_service.complete_task(completed_task.id)
         
-        # 获取待处理任务
+        # 获取待处理任务（别名方法）
         pending_tasks = self.task_service.get_pending_tasks()
         self.assertEqual(len(pending_tasks), 3)
         for task in pending_tasks:
-            self.assertEqual(task.status, "pending")
+            self.assertTrue(task.is_pending)
+            self.assertFalse(task.is_completed)
     
     def test_complete_task(self) -> None:
         """测试完成任务功能"""
-        task = self.task_service.create_task("https://example.com", "GET")
+        task = self.task_service.create_task("https://example.com", "GET", total_num=10)
         
         # 完成任务
         completed_task = self.task_service.complete_task(task.id)
-        self.assertEqual(completed_task.status, "completed")
+        self.assertEqual(completed_task.visited_num, 10)
+        self.assertTrue(completed_task.is_completed)
         self.assertEqual(completed_task.id, task.id)
         
         # 完成任务并设置已访问数量
-        task2 = self.task_service.create_task("https://example2.com", "GET")
+        task2 = self.task_service.create_task("https://example2.com", "GET", total_num=50)
         completed_task2 = self.task_service.complete_task(task2.id, visited_num=100)
-        self.assertEqual(completed_task2.status, "completed")
         self.assertEqual(completed_task2.visited_num, 100)
+        self.assertTrue(completed_task2.is_completed)
     
     def test_fail_task(self) -> None:
-        """测试标记任务失败功能"""
+        """测试标记任务失败功能（增加重试次数）"""
         task = self.task_service.create_task("https://example.com", "GET")
         
         # 标记任务失败（默认增加重试次数）
         failed_task = self.task_service.fail_task(task.id)
-        self.assertEqual(failed_task.status, "failed")
         self.assertEqual(failed_task.retry_count, 1)
+        self.assertFalse(failed_task.is_completed)
         
         # 标记任务失败但不增加重试次数
         task2 = self.task_service.create_task("https://example2.com", "GET")
         failed_task2 = self.task_service.fail_task(task2.id, increment_retry=False)
-        self.assertEqual(failed_task2.status, "failed")
         self.assertEqual(failed_task2.retry_count, 0)
+        self.assertFalse(failed_task2.is_completed)
     
     def test_reset_task(self) -> None:
         """测试重置任务功能"""
-        task = self.task_service.create_task("https://example.com", "GET")
+        task = self.task_service.create_task("https://example.com", "GET", total_num=10, visited_num=5)
         
-        # 先将任务状态改为失败
+        # 先将任务增加重试次数
         self.task_service.fail_task(task.id)
         task = self.task_service.get_task_by_id(task.id)
-        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.retry_count, 1)
+        self.assertEqual(task.visited_num, 5)
         
-        # 重置任务为待处理
+        # 重置任务进度（将访问数量重置为0）
         reset_task = self.task_service.reset_task(task.id)
-        self.assertEqual(reset_task.status, "pending")
+        self.assertEqual(reset_task.visited_num, 0)
+        self.assertEqual(reset_task.retry_count, 0)
+        self.assertFalse(reset_task.is_completed)
         self.assertEqual(reset_task.id, task.id)
     
     def test_database_rollback_on_error(self) -> None:
@@ -485,12 +472,12 @@ class TestTaskService(unittest.TestCase):
             mock_commit.side_effect = SQLAlchemyError("模拟数据库错误")
             
             with self.assertRaises(SQLAlchemyError):
-                self.task_service.update_task_status(task.id, "running")
+                self.task_service.update_task_progress(task.id)
             
             # 验证数据库回滚被调用
             with patch('src.app.db.session.rollback') as mock_rollback:
                 try:
-                    self.task_service.update_task_status(task.id, "running")
+                    self.task_service.update_task_progress(task.id)
                 except SQLAlchemyError:
                     pass
                 mock_rollback.assert_called_once()

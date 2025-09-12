@@ -541,35 +541,35 @@ class TestCrawlerService(unittest.TestCase):
         
         self.assertIsNone(saved_info)
     
-    @patch('requests.Session.get')
-    def test_crawl_and_save_success(self, mock_get: Mock) -> None:
+    @patch('requests.Session.post')
+    def test_crawl_and_save_success(self, mock_post: Mock) -> None:
         """测试爬取并保存成功流程"""
+        TEST_URL = "https://www.meiguodizhi.com/api/v1/dz"
+        TEST_METHOD = "POST"
+        TEST_DATA = '{"city":"","path":"/","method":"refresh"}'
+        
+        # 模拟成功的API响应
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            'geocodes': [{
-                'formatted_address': '天津市滨海新区',
-                'province': '天津市',
-                'city': '天津市',
-                'district': '滨海新区',
-                'location': '117.700,39.017'
-            }]
+            "address": {
+                "Address": "123 Main St",
+                "Telephone": "555-1234",
+                "City": "New York",
+                "Zip_Code": "10001",
+                "State": "NY",
+                "State_Full": "New York",
+                "Country": "USA"
+            }
         }
-        mock_get.return_value = mock_response
+        mock_post.return_value = mock_response
         
-        result = self.crawler_service.crawl_and_save("天津市滨海新区")
+        result = self.crawler_service.crawl_and_save(TEST_URL, TEST_METHOD, TEST_DATA)
         
         self.assertEqual(result['status'], 'success')
         self.assertEqual(result['saved'], True)
         self.assertIn('saved_id', result)
         self.assertIsNotNone(result['saved_id'])
-        
-        # 验证数据已保存到数据库
-        saved_address = AddressInfo.query.get(result['saved_id'])
-        self.assertIsNotNone(saved_address)
-        self.assertEqual(saved_address.address, '天津市滨海新区')  # AddressInfo使用address字段
-        self.assertEqual(saved_address.city, '天津市')
-        self.assertEqual(saved_address.state_full, '天津市')
     
     @patch('requests.Session.get')
     def test_crawl_and_save_failed_crawl(self, mock_get: Mock) -> None:

@@ -93,7 +93,6 @@ class CrawlerService:
         for attempt in range(retry_count):
             try:
                 self.logger.debug(f"尝试第 {attempt + 1} 次请求")
-                
                 # 根据method选择请求方式
                 if method.upper() == 'GET':
                     response = self.session.get(target_url, **request_kwargs)
@@ -259,11 +258,21 @@ class CrawlerService:
         try:
             # 尝试解析JSON响应
             response_data = response.json()
+            address_data = response_data.get("address", {});
             self.logger.debug(f"API响应数据: {response_data}")
             
             # 提取地址信息
-            address_info = self._extract_address_info(response_data, url)
-            
+            # address_info = self._extract_address_info(response_data, url)
+            address_info = AddressInfo()
+            if address_data:
+                address_info.address = address_data.get("Address")
+                address_info.telephone = address_data.get("Telephone")
+                address_info.city = address_data.get("City")
+                address_info.zip_code = address_data.get("Zip_Code")
+                address_info.state = address_data.get("State")
+                address_info.state_full = address_data.get("State_Full")
+                address_info.country = address_data.get("Country")
+                address_info.source_url = url
             return {
                 'status': 'success',
                 'url': url,
@@ -296,137 +305,6 @@ class CrawlerService:
             self.logger.error(error_msg, exc_info=True)
             raise ValueError(error_msg)
     
-    def _extract_address_info(self, response_data: Dict[str, Any], original_url: str) -> Dict[str, Any]:
-        """
-        从API响应中提取地址信息
-        
-        Args:
-            response_data: API响应数据
-            original_url: 原始请求URL
-            
-        Returns:
-            Dict[str, Any]: 提取的地址信息
-        """
-        # 通用的地址信息提取逻辑
-        address_info = {
-            'original_url': original_url,
-            'formatted_address': '',
-            'province': '',
-            'city': '',
-            'district': '',
-            'street': '',
-            'street_number': '',
-            'longitude': None,
-            'latitude': None,
-            'confidence': None,
-            'level': ''
-        }
-        
-        try:
-            # 尝试从常见字段中提取信息
-            # 处理高德地图API格式
-            if 'geocodes' in response_data and response_data['geocodes']:
-                geocode = response_data['geocodes'][0]
-                address_info.update({
-                    'formatted_address': geocode.get('formatted_address', ''),
-                    'province': geocode.get('province', ''),
-                    'city': geocode.get('city', ''),
-                    'district': geocode.get('district', ''),
-                    'street': geocode.get('street', ''),
-                    'street_number': geocode.get('number', ''),
-                    'level': geocode.get('level', '')
-                })
-                
-                # 解析坐标
-                location = geocode.get('location', '')
-                if location and ',' in location:
-                    lng, lat = location.split(',')
-                    address_info['longitude'] = float(lng.strip())
-                    address_info['latitude'] = float(lat.strip())
-            
-            # 处理百度地图API格式
-            elif 'result' in response_data:
-                result = response_data['result']
-                address_info.update({
-                    'formatted_address': result.get('formatted_address', ''),
-                    'province': result.get('addressComponent', {}).get('province', ''),
-                    'city': result.get('addressComponent', {}).get('city', ''),
-                    'district': result.get('addressComponent', {}).get('district', ''),
-                    'street': result.get('addressComponent', {}).get('street', ''),
-                    'street_number': result.get('addressComponent', {}).get('street_number', ''),
-                    'confidence': result.get('confidence'),
-                    'level': result.get('level', '')
-                })
-                
-                # 解析坐标
-                location = result.get('location', {})
-                if location:
-                    address_info['longitude'] = location.get('lng')
-                    address_info['latitude'] = location.get('lat')
-            
-            # 处理通用格式
-            else:
-                # 尝试从响应中提取地址相关字段
-                for key, value in response_data.items():
-                    key_lower = key.lower()
-                    if 'address' in key_lower:
-                        if isinstance(value, str):
-                            address_info['formatted_address'] = value
-                        elif isinstance(value, dict):
-                            address_info.update(self._extract_from_dict(value))
-                    elif key_lower in ['location', 'point', 'coordinate']:
-                        if isinstance(value, dict):
-                            if 'lng' in value and 'lat' in value:
-                                address_info['longitude'] = value['lng']
-                                address_info['latitude'] = value['lat']
-                            elif 'lon' in value and 'lat' in value:
-                                address_info['longitude'] = value['lon']
-                                address_info['latitude'] = value['lat']
-                            elif 'x' in value and 'y' in value:
-                                address_info['longitude'] = value['x']
-                                address_info['latitude'] = value['y']
-                
-                # 如果没有格式化地址，使用原始URL
-                if not address_info['formatted_address']:
-                    address_info['formatted_address'] = original_url
-            
-            self.logger.debug(f"提取的地址信息: {address_info}")
-            return address_info
-            
-        except Exception as e:
-            self.logger.warning(f"地址信息提取失败: {str(e)}")
-            # 返回包含原始URL的基本信息
-            address_info['formatted_address'] = original_url
-            return address_info
-    
-    def _extract_from_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        从字典中提取地址信息
-        
-        Args:
-            data: 包含地址信息的字典
-            
-        Returns:
-            Dict[str, Any]: 提取的地址信息
-        """
-        result = {}
-        
-        # 映射常见的地址字段
-        field_mapping = {
-            'province': ['province', 'state', '省', '州'],
-            'city': ['city', '市', '城市'],
-            'district': ['district', 'area', '区县', '区', '县'],
-            'street': ['street', 'road', '街道', '路'],
-            'street_number': ['street_number', 'number', 'streetNumber', '门牌号', '号']
-        }
-        
-        for target_field, possible_keys in field_mapping.items():
-            for key in possible_keys:
-                if key in data:
-                    result[target_field] = data[key]
-                    break
-        
-        return result
     
     def save_address_info(self, address_data: Dict[str, Any]) -> Optional[AddressInfo]:
         """
@@ -444,42 +322,16 @@ class CrawlerService:
                 return None
             
             data = address_data.get('data', {})
-            
-            # 创建AddressInfo实例，使用formatted_address作为address字段
-            address_info = AddressInfo(
-                address=data.get('formatted_address', address_data.get('url', '')),
-                city=data.get('city', ''),
-                state_full=data.get('province', ''),
-                telephone=None,  # 爬虫服务不提供电话号码
-                zip_code=None,   # 爬虫服务不提供邮编
-                state=data.get('province', ''),  # 简写省份
-                country='中国'   # 默认中国
-            )
-            
-            # 设置额外的自定义字段（如果模型支持）
-            try:
-                address_info.original_url = address_data.get('url', '')
-                address_info.formatted_address = data.get('formatted_address', '')
-                address_info.province = data.get('province', '')
-                address_info.district = data.get('district', '')
-                address_info.street = data.get('street', '')
-                address_info.street_number = data.get('street_number', '')
-                address_info.longitude = data.get('longitude')
-                address_info.latitude = data.get('latitude')
-                address_info.confidence = data.get('confidence')
-                address_info.level = data.get('level', '')
-                address_info.raw_response = json.dumps(address_data.get('raw_response', {}))
-                address_info.status = 'completed'
-            except AttributeError:
-                # 如果某些字段不存在，忽略它们
-                pass
-            
+            if not isinstance(data, AddressInfo):
+                self.logger.warning("数据格式不正确，无法保存")
+                return None
+                
             # 保存到数据库
-            db.session.add(address_info)
+            db.session.add(data)
             db.session.commit()
             
-            self.logger.info(f"地址信息已保存: {address_info.formatted_address}")
-            return address_info
+            self.logger.info(f"地址信息已保存: {data.address}")
+            return data
             
         except SQLAlchemyError as e:
             db.session.rollback()

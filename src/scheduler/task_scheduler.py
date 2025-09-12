@@ -369,11 +369,12 @@ class TaskScheduler:
         job_execution_times: 作业执行时间记录
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, config: Optional[Dict[str, Any]] = None, app=None) -> None:
         """初始化任务调度器
         
         Args:
             config: 调度器配置字典，如果为None则使用默认配置
+            app: Flask应用实例，用于提供应用上下文
         """
         self.logger = get_logger(__name__)
         self._config = config or get_scheduler_config()
@@ -383,6 +384,8 @@ class TaskScheduler:
         self._start_time: Optional[datetime] = None
         self._performance_metrics = PerformanceMetrics()
         self._job_execution_times: Dict[str, float] = {}
+        self._auto_execution_job_id: Optional[str] = None  # 自动执行任务的作业ID
+        self._app = app  # Flask应用实例
         
         self.logger.info("开始初始化任务调度器")
         self._initialize_scheduler()
@@ -462,7 +465,13 @@ class TaskScheduler:
             
             # 记录启动成功信息
             self.logger.info(f"任务调度器启动成功 - 启动时间: {self._start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            self.logger.info(f"当前调度器状态: 运行中={self._is_running}, 作业数量={len(self.get_jobs())}")
+            self.logger.info(f"当前调度器状态: 运行中={self._is_running}")
+            
+            # 检查是否需要启动自动任务执行
+            if self._config.get("auto_execution_enabled", False):
+                interval = self._config.get("auto_execution_interval", 30)
+                self.logger.info(f"检测到自动任务执行配置，间隔时间: {interval}秒")
+                self.start_auto_execution(interval)
             
             return True
             
@@ -471,6 +480,87 @@ class TaskScheduler:
             self._is_running = False
             self._start_time = None
             return False
+    
+    def start_auto_execution(self, interval_seconds: int = 30) -> bool:
+        """启动自动任务执行
+        
+        创建一个定时任务，定期执行待处理的爬虫任务。
+        
+        Args:
+            interval_seconds: 执行间隔时间（秒），默认30秒
+            
+        Returns:
+            bool: 是否成功启动
+        """
+        if not self._is_running:
+            self.logger.error("调度器未运行，无法启动自动任务执行")
+            return False
+        
+        try:
+            # 如果已有自动执行任务，先停止它
+            if self._auto_execution_job_id:
+                self.stop_auto_execution()
+            
+            self.logger.info(f"启动自动任务执行，间隔时间: {interval_seconds}秒")
+            
+            # 创建定时任务
+            job = self.add_job(
+                func=self._execute_pending_tasks_wrapper,  # 包装函数
+                trigger='interval',
+                seconds=interval_seconds,
+                id='auto_execute_pending_tasks',
+                name='自动执行待处理任务',
+                max_instances=1,  # 确保不会并发执行
+                coalesce=True,    # 如果错过执行，合并为一次
+                misfire_grace_time=60  # 错过执行的宽限时间
+            )
+            
+            if job:
+                self._auto_execution_job_id = job.id
+                self.logger.info(f"自动任务执行已启动，作业ID: {job.id}")
+                return True
+            else:
+                self.logger.error("创建自动执行任务失败")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"启动自动任务执行失败: {e}")
+            return False
+    
+    def stop_auto_execution(self) -> bool:
+        """停止自动任务执行
+        
+        停止定时执行待处理任务的作业。
+        
+        Returns:
+            bool: 是否成功停止
+        """
+        if not self._auto_execution_job_id:
+            self.logger.warning("没有正在运行的自动执行任务")
+            return True
+        
+        try:
+            self.logger.info(f"停止自动任务执行，作业ID: {self._auto_execution_job_id}")
+            result = self.remove_job(self._auto_execution_job_id)
+            if result:
+                self._auto_execution_job_id = None
+                self.logger.info("自动任务执行已停止")
+            return result
+        except Exception as e:
+            self.logger.error(f"停止自动任务执行失败: {e}")
+            return False
+    
+    def _execute_pending_tasks_wrapper(self) -> None:
+        """执行待处理任务的包装函数
+        
+        用于定时任务调用的包装函数，处理异常并记录日志。
+        """
+        try:
+            self.logger.info("定时任务开始执行待处理任务扫描...")
+            executed_count = self.execute_pending_tasks()
+            self.logger.info(f"定时任务完成，共执行 {executed_count} 个任务")
+        except Exception as e:
+            self.logger.error(f"定时任务执行失败: {e}")
     
     def stop(self, wait: bool = True) -> bool:
         """停止调度器
@@ -508,6 +598,9 @@ class TaskScheduler:
             # 记录停止成功信息
             stop_time = datetime.now()
             self.logger.info(f"任务调度器停止成功 - 停止时间: {stop_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # 停止自动任务执行
+            self.stop_auto_execution()
             
             return True
             
@@ -1013,132 +1106,135 @@ class TaskScheduler:
         self.logger.info("开始执行待处理任务扫描...")
         
         try:
-            # 使用Flask的数据库连接
-            from src.app import db
-            
-            # 查询待处理且未完成的任务
-            pending_tasks = db.session.query(Task).filter(
-                Task.status == 'pending',
-                Task.visited_num < Task.total_num,
-                Task.total_num > 0
-            ).all()
-            
-            if not pending_tasks:
-                self.logger.info("没有待执行的任务")
-                return 0
-            
-            self.logger.info(f"发现 {len(pending_tasks)} 个待执行任务")
-            
-            # 记录任务详情
-            self.logger.info("待执行任务详情:")
-            for i, task in enumerate(pending_tasks[:10], 1):  # 只显示前10个任务
-                self.logger.info(f"  {i}. 任务ID: {task.id}, URL: {task.url}, "
-                               f"进度: {task.visited_num}/{task.total_num}")
-            if len(pending_tasks) > 10:
-                self.logger.info(f"  ... 还有 {len(pending_tasks) - 10} 个任务待执行")
-            
-            # 初始化爬虫服务
-            crawler_service = CrawlerService()
-            
-            for task in pending_tasks:
+            # 确保在应用上下文中执行数据库操作
+            if self._app:
+                # 如果提供了应用实例，使用它
+                with self._app.app_context():
+                    return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
+            else:
+                # 尝试获取当前应用上下文，如果没有则创建新的
                 try:
-                    # 更新任务状态为运行中
-                    task.update_status('running')
-                    db.session.commit()
-                    
-                    self.logger.info(f"开始执行任务: {task.id} - {task.url}")
-                    
-                    # 执行爬虫任务并保存结果
-                    # 使用Task模型的完整HTTP配置
-                    result = crawler_service.crawl_and_save(
-                        task.url,
-                        method=task.method,
-                        body=task.body,
-                        headers=task.headers,
-                        timeout=task.timeout,
-                        retry_count=task.retry_count
-                    )
-                    
-                    # 更新任务状态和统计信息
-                    if result['status'] == 'success':
-                        task.update_status('completed')
-                        task.increment_visited()
-                        success_count += 1
-                        self._statistics.record_success(f"task_{task.id}", task.url)
-                        self.logger.info(f"任务执行成功: {task.id}")
+                    from flask import current_app
+                    if current_app:
+                        return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
                     else:
-                        task.update_status('failed')
-                        task.increment_retry()
-                        failure_count += 1
-                        error_msg = result.get('error', '未知错误')
-                        self._statistics.record_failure(f"task_{task.id}", task.url, error_msg)
-                        self.logger.warning(f"任务执行失败: {task.id}, 原因: {error_msg}")
-                    
-                    db.session.commit()
-                    executed_count += 1
-                    
-                except Exception as e:
-                    self.logger.error(f"执行任务 {task.id} 时发生错误: {e}")
-                    task.update_status('failed')
-                    task.increment_retry()
-                    failure_count += 1
-                    self._statistics.record_failure(f"task_{task.id}", task.url, str(e))
-                    db.session.commit()
-                    continue
-            
-            crawler_service.close()
-            
-            # 记录详细的执行统计摘要
-            execution_time = datetime.now() - start_time
-            self.logger.info("任务执行扫描完成")
-            self.logger.info(f"执行统计摘要:")
-            self.logger.info(f"  - 总计执行: {executed_count} 个任务")
-            self.logger.info(f"  - 成功: {success_count} 个")
-            self.logger.info(f"  - 失败: {failure_count} 个")
-            self.logger.info(f"  - 执行耗时: {execution_time}")
-            self.logger.info(f"  - 平均执行时间: {execution_time / executed_count if executed_count > 0 else 0}")
-            
-            # 每执行完一批任务记录统计报告
-            if executed_count > 0:
-                self.log_statistics_report()
-            
-            return executed_count
-                
+                        # 创建临时应用上下文
+                        from src.app import create_app
+                        app = create_app()
+                        with app.app_context():
+                            return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
+                except RuntimeError:
+                    # 没有应用上下文，创建新的
+                    from src.app import create_app
+                    app = create_app()
+                    with app.app_context():
+                        return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
         except Exception as e:
             self.logger.error(f"执行待处理任务时发生错误: {e}")
             execution_time = datetime.now() - start_time
             self.logger.error(f"执行失败，已运行时间: {execution_time}")
             return executed_count
     
-    def _execute_single_task(self, task: Task, crawler_service: CrawlerService) -> Dict[str, Any]:
-        """执行单个任务
+    def _execute_pending_tasks_internal(self, executed_count: int, success_count: int, failure_count: int, start_time: datetime) -> int:
+        """内部方法：在应用上下文中执行待处理任务
         
         Args:
-            task: 任务对象
-            crawler_service: 爬虫服务实例
+            executed_count: 已执行计数
+            success_count: 成功计数
+            failure_count: 失败计数
+            start_time: 开始时间
             
         Returns:
-            Dict[str, Any]: 执行结果
+            int: 执行的任务数量
         """
-        try:
-            result = crawler_service.crawl_address(
-                task.url,
-                method=task.method,
-                body=task.body,
-                headers=task.headers,
-                timeout=task.timeout,
-                retry_count=task.retry_count
-            )
-            
-            return result
-            
-        except Exception as e:
-            error_msg = f"执行任务时发生异常: {str(e)}"
-            self.logger.error(error_msg)
-            return {
-                'status': 'error',
-                'error': error_msg
-            }
+        # 使用Flask的数据库连接
+        from src.app import db
+        
+        # 查询待处理且未完成的任务
+        pending_tasks = db.session.query(Task).filter(
+            Task.visited_num < Task.total_num,
+            Task.total_num > 0
+        ).all()
+        
+        if not pending_tasks:
+            self.logger.info("没有待执行的任务")
+            return 0
+        
+        self.logger.info(f"发现 {len(pending_tasks)} 个待执行任务")
+        
+        # 记录任务详情
+        self.logger.info("待执行任务详情:")
+        for i, task in enumerate(pending_tasks[:10], 1):  # 只显示前10个任务
+            self.logger.info(f"  {i}. 任务ID: {task.id}, URL: {task.url}, "
+                           f"进度: {task.visited_num}/{task.total_num}")
+        if len(pending_tasks) > 10:
+            self.logger.info(f"  ... 还有 {len(pending_tasks) - 10} 个任务待执行")
+        
+        # 初始化爬虫服务
+        crawler_service = CrawlerService()
+        
+        for task in pending_tasks:
+            try:
+                # 任务开始执行，无需状态更新
+                self.logger.debug(f"任务开始执行: {task.id} - {task.url}")
+                db.session.commit()
+                
+                self.logger.info(f"开始执行任务: {task.id} - {task.url}")
+                
+                # 执行爬虫任务并保存结果
+                # 使用Task模型的完整HTTP配置
+                result = crawler_service.crawl_and_save(
+                    task.url,
+                    method=task.method,
+                    body=task.body,
+                    headers=task.headers,
+                    timeout=task.timeout,
+                    retry_count=task.retry_count
+                )
+                
+                # 更新任务统计信息
+                if result['status'] == 'success':
+                    task.increment_visited()
+                    success_count += 1
+                    self._statistics.record_success(f"task_{task.id}", task.url)
+                    self.logger.info(f"任务执行成功: {task.id} (进度: {task.visited_num}/{task.total_num})")
+                else:
+                    
+                    task.increment_retry()
+                    failure_count += 1
+                    error_msg = result.get('error', '未知错误')
+                    self._statistics.record_failure(f"task_{task.id}", task.url, error_msg)
+                    self.logger.warning(f"任务执行失败: {task.id}, 原因: {error_msg}")
+                
+                db.session.commit()
+                executed_count += 1
+                
+            except Exception as e:
+                self.logger.error(f"执行任务 {task.id} 时发生错误: {e}")
+                
+                task.increment_retry()
+                failure_count += 1
+                self._statistics.record_failure(f"task_{task.id}", task.url, str(e))
+                db.session.commit()
+                continue
+        
+        crawler_service.close()
+        
+        # 记录详细的执行统计摘要
+        execution_time = datetime.now() - start_time
+        self.logger.info("任务执行扫描完成")
+        self.logger.info(f"执行统计摘要:")
+        self.logger.info(f"  - 总计执行: {executed_count} 个任务")
+        self.logger.info(f"  - 成功: {success_count} 个")
+        self.logger.info(f"  - 失败: {failure_count} 个")
+        self.logger.info(f"  - 执行耗时: {execution_time}")
+        self.logger.info(f"  - 平均执行时间: {execution_time / executed_count if executed_count > 0 else 0}")
+        
+        # 每执行完一批任务记录统计报告
+        if executed_count > 0:
+            self.log_statistics_report()
+        
+        return executed_count
 
 
 # 全局调度器实例

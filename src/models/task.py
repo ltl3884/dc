@@ -17,7 +17,7 @@ class Task(db.Model):
     任务模型类
     
     用于定义爬虫任务的数据结构，包含任务执行所需的所有信息
-    和任务执行状态的跟踪字段。
+    和任务完成进度的跟踪字段（通过 visited_num/total_num 比率）。
     """
     
     __tablename__ = 'tasks'
@@ -35,15 +35,6 @@ class Task(db.Model):
     total_num = Column(Integer, nullable=False, default=0, comment='预期爬取数量')
     visited_num = Column(Integer, nullable=False, default=0, comment='已访问数量')
     
-    # 任务状态字段
-    status = Column(
-        String(20), 
-        nullable=False, 
-        default='pending',
-        server_default='pending',
-        index=True,
-        comment='任务状态: pending, running, completed, failed'
-    )
     
     # 任务配置字段
     timeout = Column(Integer, nullable=False, default=30, comment='请求超时时间(秒)')
@@ -93,6 +84,8 @@ class Task(db.Model):
         self.body = body
         self.headers = headers or {}
         self.total_num = total_num
+        self.visited_num = 0
+        self.retry_count = 0
         self.timeout = timeout
         
         # 设置其他字段
@@ -102,7 +95,7 @@ class Task(db.Model):
     
     def __repr__(self) -> str:
         """返回对象的字符串表示"""
-        return f"<Task(id={self.id}, url='{self.url}', status='{self.status}')>"
+        return f"<Task(id={self.id}, url='{self.url}', completion_rate={self.completion_rate:.2f})>"
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -119,7 +112,6 @@ class Task(db.Model):
             'headers': self.headers,
             'total_num': self.total_num,
             'visited_num': self.visited_num,
-            'status': self.status,
             'timeout': self.timeout,
             'retry_count': self.retry_count,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -139,14 +131,6 @@ class Task(db.Model):
         """增加重试次数"""
         self.retry_count += 1
     
-    def update_status(self, status: str) -> None:
-        """
-        更新任务状态
-        
-        Args:
-            status: 新的状态值
-        """
-        self.status = status
     
     @property
     def completion_rate(self) -> float:
@@ -166,29 +150,9 @@ class Task(db.Model):
         检查任务是否已完成
         
         Returns:
-            bool: 如果状态为completed则返回True
+            bool: 如果访问数量等于总数量则返回True
         """
-        return self.status == 'completed'
-    
-    @property
-    def is_failed(self) -> bool:
-        """
-        检查任务是否已失败
-        
-        Returns:
-            bool: 如果状态为failed则返回True
-        """
-        return self.status == 'failed'
-    
-    @property
-    def is_running(self) -> bool:
-        """
-        检查任务是否正在运行
-        
-        Returns:
-            bool: 如果状态为running则返回True
-        """
-        return self.status == 'running'
+        return self.total_num > 0 and self.visited_num >= self.total_num
     
     @property
     def is_pending(self) -> bool:
@@ -196,6 +160,8 @@ class Task(db.Model):
         检查任务是否待处理
         
         Returns:
-            bool: 如果状态为pending则返回True
+            bool: 如果访问数量小于总数量则返回True，总数量为0时返回False
         """
-        return self.status == 'pending'
+        if self.total_num <= 0:
+            return False
+        return self.visited_num < self.total_num

@@ -56,7 +56,7 @@ class AddressInfo(db.Model):
     
     def __init__(
         self,
-        address: str,
+        address: Optional[str] = None,
         telephone: Optional[str] = None,
         city: Optional[str] = None,
         zip_code: Optional[str] = None,

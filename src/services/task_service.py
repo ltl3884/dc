@@ -121,8 +121,7 @@ class TaskService:
         """
         获取下一个待处理的任务
         
-        按照创建时间升序获取状态为pending的任务，
-        并将其状态更新为running。
+        按照创建时间升序获取未完成的任务（visited_num < total_num）。
         
         Returns:
             Optional[Task]: 获取到的任务实例，如果没有待处理任务则返回None
@@ -132,18 +131,20 @@ class TaskService:
         """
         try:
             self.logger.debug("开始获取待处理任务")
-            # 查找待处理任务，按创建时间排序
-            task = Task.query.filter_by(status='pending')\
-                           .order_by(Task.created_at.asc())\
-                           .first()
+            # 查找未完成任务，按创建时间排序
+            task = Task.query.filter(
+                Task.visited_num < Task.total_num,
+                Task.total_num > 0
+            ).order_by(Task.created_at.asc()).first()
+            
+            # 如果没有找到任务，尝试查找 total_num=0 的任务（视为未完成）
+            if not task:
+                task = Task.query.filter(
+                    Task.total_num == 0
+                ).order_by(Task.created_at.asc()).first()
             
             if task:
                 self.logger.debug(f"找到待处理任务: ID={task.id}, URL={task.url}")
-                # 更新任务状态为运行中
-                task.status = 'running'
-                task.updated_at = datetime.utcnow()
-                db.session.commit()
-                
                 self.logger.info(f"获取待处理任务: ID={task.id}, URL={task.url}")
             else:
                 self.logger.debug("没有待处理的任务")
@@ -159,23 +160,23 @@ class TaskService:
             self.logger.error(f"获取待处理任务失败 - 未知错误: {str(e)}")
             raise SQLAlchemyError(f"获取待处理任务时发生未知错误: {str(e)}")
     
-    def update_task_status(
+    def update_task_progress(
         self,
         task_id: int,
-        status: str,
         visited_num: Optional[int] = None,
         increment_visited: int = 0,
-        increment_retry: bool = False
+        increment_retry: bool = False,
+        reset_retry_count: bool = False
     ) -> Task:
         """
-        更新任务状态
+        更新任务进度
         
         Args:
             task_id: 任务ID
-            status: 新状态 (pending, running, completed, failed)
             visited_num: 已访问数量，如果提供则直接设置该值
             increment_visited: 增加已访问数量，默认为0
             increment_retry: 是否增加重试次数，默认为False
+            reset_retry_count: 是否重置重试次数为0，默认为False
             
         Returns:
             Task: 更新后的任务实例
@@ -184,35 +185,26 @@ class TaskService:
             ValueError: 当参数无效时
             SQLAlchemyError: 当数据库操作失败时
         """
-        self.logger.debug(f"开始更新任务状态: ID={task_id}, 状态={status}")
+        self.logger.debug(f"开始更新任务进度: ID={task_id}")
         try:
             # 参数验证
             if not task_id or task_id <= 0:
-                self.logger.error(f"更新任务状态失败: 无效的任务ID - {task_id}")
+                self.logger.error(f"更新任务进度失败: 无效的任务ID - {task_id}")
                 raise ValueError("任务ID必须为正整数")
-            
-            valid_statuses = ['pending', 'running', 'completed', 'failed']
-            if status not in valid_statuses:
-                self.logger.error(f"更新任务状态失败: 无效的状态 - {status}")
-                raise ValueError(f"无效的状态: {status}，有效状态为: {valid_statuses}")
             
             # 查找任务
             self.logger.debug(f"查找任务: ID={task_id}")
             task = Task.query.get(task_id)
             if not task:
-                self.logger.error(f"更新任务状态失败: 任务不存在 - ID={task_id}")
+                self.logger.error(f"更新任务进度失败: 任务不存在 - ID={task_id}")
                 raise ValueError(f"任务不存在: ID={task_id}")
             
-            self.logger.debug(f"找到任务: ID={task_id}, 原状态={task.status}, 新状态={status}")
-            
-            # 更新状态
-            task.status = status
-            task.updated_at = datetime.utcnow()
+            self.logger.debug(f"找到任务: ID={task_id}, 当前进度={task.visited_num}/{task.total_num}")
             
             # 更新已访问数量
             if visited_num is not None:
                 if visited_num < 0:
-                    self.logger.error(f"更新任务状态失败: 已访问数量为负数 - {visited_num}")
+                    self.logger.error(f"更新任务进度失败: 已访问数量为负数 - {visited_num}")
                     raise ValueError("已访问数量不能为负数")
                 self.logger.debug(f"更新已访问数量: {task.visited_num} -> {visited_num}")
                 task.visited_num = visited_num
@@ -222,17 +214,26 @@ class TaskService:
                 self.logger.debug(f"增加已访问数量: {old_visited} -> {task.visited_num} (+{increment_visited})")
             
             # 更新重试次数
-            if increment_retry:
+            if reset_retry_count:
+                old_retry = task.retry_count
+                task.retry_count = 0
+                self.logger.debug(f"重置重试次数: {old_retry} -> 0")
+            elif increment_retry:
                 old_retry = task.retry_count
                 task.increment_retry()
                 self.logger.debug(f"增加重试次数: {old_retry} -> {task.retry_count}")
+            
+            # 更新时间戳
+            task.updated_at = datetime.utcnow()
             
             # 提交更改
             db.session.commit()
             
             self.logger.info(
-                f"任务状态更新: ID={task.id}, 状态={status}, "
-                f"已访问={task.visited_num}, 重试={task.retry_count}"
+                f"任务进度更新: ID={task.id}, "
+                f"进度={task.visited_num}/{task.total_num}, "
+                f"完成率={task.completion_rate:.2%}, "
+                f"重试={task.retry_count}"
             )
             
             return task
@@ -242,12 +243,12 @@ class TaskService:
             raise
         except SQLAlchemyError as e:
             db.session.rollback()
-            self.logger.error(f"更新任务状态失败 - 数据库错误: ID={task_id}, 错误={str(e)}")
+            self.logger.error(f"更新任务进度失败 - 数据库错误: ID={task_id}, 错误={str(e)}")
             raise SQLAlchemyError(f"数据库操作失败: {str(e)}")
         except Exception as e:
             db.session.rollback()
-            self.logger.error(f"更新任务状态失败 - 未知错误: ID={task_id}, 错误={str(e)}")
-            raise SQLAlchemyError(f"更新任务状态时发生未知错误: {str(e)}")
+            self.logger.error(f"更新任务进度失败 - 未知错误: ID={task_id}, 错误={str(e)}")
+            raise SQLAlchemyError(f"更新任务进度时发生未知错误: {str(e)}")
     
     def get_task_by_id(self, task_id: int) -> Optional[Task]:
         """
@@ -266,7 +267,7 @@ class TaskService:
             self.logger.debug(f"开始获取任务: ID={task_id}")
             task = Task.query.get(task_id)
             if task:
-                self.logger.info(f"成功获取任务: ID={task_id}, URL={task.url}, 状态={task.status}")
+                self.logger.info(f"成功获取任务: ID={task_id}, URL={task.url}, 完成率={task.completion_rate:.2%}")
             else:
                 self.logger.info(f"任务不存在: ID={task_id}")
             return task
@@ -274,80 +275,97 @@ class TaskService:
             self.logger.error(f"获取任务失败: ID={task_id}, 错误={str(e)}")
             raise SQLAlchemyError(f"获取任务失败: {str(e)}")
     
-    def get_tasks_by_status(self, status: str) -> List[Task]:
+    def get_incomplete_tasks(self) -> List[Task]:
         """
-        根据状态获取任务列表
+        获取所有未完成的任务
         
-        Args:
-            status: 任务状态
-            
         Returns:
-            List[Task]: 任务列表
+            List[Task]: 未完成的任务列表
             
         Raises:
-            ValueError: 当状态无效时
             SQLAlchemyError: 当数据库操作失败时
         """
         try:
-            self.logger.debug(f"开始获取任务列表: 状态={status}")
-            valid_statuses = ['pending', 'running', 'completed', 'failed']
-            if status not in valid_statuses:
-                raise ValueError(f"无效的状态: {status}，有效状态为: {valid_statuses}")
-            
-            tasks = Task.query.filter_by(status=status).all()
-            self.logger.info(f"成功获取任务列表: 状态={status}, 数量={len(tasks)}")
+            self.logger.debug("开始获取未完成任务列表")
+            tasks = Task.query.filter(
+                db.or_(
+                    db.and_(Task.visited_num < Task.total_num, Task.total_num > 0),
+                    Task.total_num == 0
+                )
+            ).all()
+            self.logger.info(f"成功获取未完成任务列表: 数量={len(tasks)}")
             return tasks
             
-        except ValueError:
-            raise
         except SQLAlchemyError as e:
-            self.logger.error(f"获取任务列表失败: 状态={status}, 错误={str(e)}")
-            raise SQLAlchemyError(f"获取任务列表失败: {str(e)}")
+            self.logger.error(f"获取未完成任务列表失败: 错误={str(e)}")
+            raise SQLAlchemyError(f"获取未完成任务列表失败: {str(e)}")
     
-    def get_running_tasks(self) -> List[Task]:
+    def get_completed_tasks(self) -> List[Task]:
         """
-        获取所有运行中的任务
+        获取所有已完成的任务
         
         Returns:
-            List[Task]: 运行中的任务列表
+            List[Task]: 已完成的任务列表
             
         Raises:
             SQLAlchemyError: 当数据库操作失败时
         """
-        return self.get_tasks_by_status('running')
+        try:
+            self.logger.debug("开始获取已完成任务列表")
+            tasks = Task.query.filter(
+                Task.visited_num >= Task.total_num,
+                Task.total_num > 0
+            ).all()
+            self.logger.info(f"成功获取已完成任务列表: 数量={len(tasks)}")
+            return tasks
+            
+        except SQLAlchemyError as e:
+            self.logger.error(f"获取已完成任务列表失败: 错误={str(e)}")
+            raise SQLAlchemyError(f"获取已完成任务列表失败: {str(e)}")
     
     def get_pending_tasks(self) -> List[Task]:
         """
-        获取所有待处理的任务
+        获取所有待处理的任务（别名，保持向后兼容）
         
         Returns:
-            List[Task]: 待处理的任务列表
+            List[Task]: 未完成的任务列表
             
         Raises:
             SQLAlchemyError: 当数据库操作失败时
         """
-        return self.get_tasks_by_status('pending')
+        return self.get_incomplete_tasks()
     
     def complete_task(self, task_id: int, visited_num: Optional[int] = None) -> Task:
         """
-        完成任务
+        完成任务（设置访问数量等于总数量）
         
         Args:
             task_id: 任务ID
-            visited_num: 已访问数量，可选
+            visited_num: 已访问数量，如果提供则设置为该值，否则设置为总数量
             
         Returns:
             Task: 更新后的任务实例
         """
-        return self.update_task_status(
-            task_id=task_id,
-            status='completed',
-            visited_num=visited_num
-        )
+        try:
+            task = self.get_task_by_id(task_id)
+            if not task:
+                raise ValueError(f"任务不存在: ID={task_id}")
+            
+            # 如果没有提供visited_num，则设置为总数量
+            if visited_num is None:
+                visited_num = task.total_num
+            
+            return self.update_task_progress(
+                task_id=task_id,
+                visited_num=visited_num
+            )
+        except Exception as e:
+            self.logger.error(f"完成任务失败: ID={task_id}, 错误={str(e)}")
+            raise
     
     def fail_task(self, task_id: int, increment_retry: bool = True) -> Task:
         """
-        标记任务失败
+        标记任务失败（增加重试次数）
         
         Args:
             task_id: 任务ID
@@ -356,15 +374,22 @@ class TaskService:
         Returns:
             Task: 更新后的任务实例
         """
-        return self.update_task_status(
-            task_id=task_id,
-            status='failed',
-            increment_retry=increment_retry
-        )
+        try:
+            task = self.get_task_by_id(task_id)
+            if not task:
+                raise ValueError(f"任务不存在: ID={task_id}")
+            
+            return self.update_task_progress(
+                task_id=task_id,
+                increment_retry=increment_retry
+            )
+        except Exception as e:
+            self.logger.error(f"标记任务失败失败: ID={task_id}, 错误={str(e)}")
+            raise
     
     def reset_task(self, task_id: int) -> Task:
         """
-        重置任务状态为待处理
+        重置任务进度（将访问数量重置为0）
         
         Args:
             task_id: 任务ID
@@ -372,7 +397,17 @@ class TaskService:
         Returns:
             Task: 更新后的任务实例
         """
-        return self.update_task_status(
-            task_id=task_id,
-            status='pending'
-        )
+        try:
+            task = self.get_task_by_id(task_id)
+            if not task:
+                raise ValueError(f"任务不存在: ID={task_id}")
+            
+            return self.update_task_progress(
+                task_id=task_id,
+                visited_num=0,
+                increment_retry=False,  # 不增加重试次数
+                reset_retry_count=True  # 重置重试次数为0
+            )
+        except Exception as e:
+            self.logger.error(f"重置任务失败: ID={task_id}, 错误={str(e)}")
+            raise

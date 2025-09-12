@@ -47,10 +47,9 @@ class TestTaskModel(unittest.TestCase):
         self.assertIsNone(task.body)
         self.assertEqual(task.headers, {})
         self.assertEqual(task.total_num, 0)
-        self.assertIsNone(task.visited_num)  # 注意：这个值在__init__中未初始化
-        self.assertIsNone(task.status)  # 注意：这个值在__init__中未初始化
+        self.assertEqual(task.visited_num, 0)
         self.assertEqual(task.timeout, 30)
-        self.assertIsNone(task.retry_count)  # 注意：这个值在__init__中未初始化
+        self.assertEqual(task.retry_count, 0)
     
     def test_task_creation_with_all_fields(self) -> None:
         """测试Task模型使用所有字段的创建功能"""
@@ -89,10 +88,9 @@ class TestTaskModel(unittest.TestCase):
         self.assertEqual(task.method, "GET")
         self.assertEqual(task.headers, {})
         self.assertEqual(task.total_num, 0)
-        self.assertIsNone(task.visited_num)  # 注意：这个值在__init__中未初始化
-        self.assertIsNone(task.status)  # 注意：这个值在__init__中未初始化
+        self.assertEqual(task.visited_num, 0)
         self.assertEqual(task.timeout, 30)
-        self.assertIsNone(task.retry_count)  # 注意：这个值在__init__中未初始化
+        self.assertEqual(task.retry_count, 0)
     
     def test_method_uppercase_conversion(self) -> None:
         """测试HTTP方法转换为大写"""
@@ -113,40 +111,25 @@ class TestTaskModel(unittest.TestCase):
         task = Task(url="https://example.com")
         self.assertEqual(task.url, "https://example.com")
     
-    def test_status_field_validation(self) -> None:
-        """测试状态字段验证"""
-        task = Task(url="https://example.com")
+    def test_completion_properties(self) -> None:
+        """测试完成状态属性"""
+        # 测试待完成的任务
+        task = Task(url="https://example.com", total_num=10, visited_num=5)
+        self.assertTrue(task.is_pending)
+        self.assertFalse(task.is_completed)
+        self.assertEqual(task.completion_rate, 0.5)
         
-        # 首先保存到数据库以获取数据库默认值
-        db.session.add(task)
-        db.session.commit()
+        # 测试已完成的任务
+        task.visited_num = 10
+        self.assertFalse(task.is_pending)
+        self.assertTrue(task.is_completed)
+        self.assertEqual(task.completion_rate, 1.0)
         
-        # 测试初始状态（从数据库重新获取）
-        saved_task = db.session.query(Task).filter_by(url="https://example.com").first()
-        self.assertEqual(saved_task.status, "pending")
-        self.assertTrue(saved_task.is_pending)
-        self.assertFalse(saved_task.is_running)
-        self.assertFalse(saved_task.is_completed)
-        self.assertFalse(saved_task.is_failed)
-        
-        # 测试状态更新
-        saved_task.update_status("running")
-        db.session.commit()
-        self.assertEqual(saved_task.status, "running")
-        self.assertTrue(saved_task.is_running)
-        self.assertFalse(saved_task.is_pending)
-        
-        saved_task.update_status("completed")
-        db.session.commit()
-        self.assertEqual(saved_task.status, "completed")
-        self.assertTrue(saved_task.is_completed)
-        self.assertFalse(saved_task.is_running)
-        
-        saved_task.update_status("failed")
-        db.session.commit()
-        self.assertEqual(saved_task.status, "failed")
-        self.assertTrue(saved_task.is_failed)
-        self.assertFalse(saved_task.is_completed)
+        # 测试 total_num 为 0 的情况
+        task.total_num = 0
+        self.assertFalse(task.is_pending)
+        self.assertFalse(task.is_completed)
+        self.assertEqual(task.completion_rate, 0.0)
     
     def test_numeric_fields_validation(self) -> None:
         """测试数值字段验证"""
@@ -237,8 +220,9 @@ class TestTaskModel(unittest.TestCase):
         import time
         time.sleep(0.1)
         
-        # 更新任务状态
-        task.update_status("running")
+        # 更新任务进度
+        task.visited_num = 5
+        task.updated_at = datetime.utcnow()
         db.session.commit()
         
         # 验证更新时间已变化，但创建时间不变
@@ -264,7 +248,7 @@ class TestTaskModel(unittest.TestCase):
         # 验证字典包含所有必要字段
         expected_fields = [
             'id', 'url', 'method', 'body', 'headers', 'total_num',
-            'visited_num', 'status', 'timeout', 'retry_count',
+            'visited_num', 'timeout', 'retry_count',
             'created_at', 'updated_at'
         ]
         
@@ -278,7 +262,7 @@ class TestTaskModel(unittest.TestCase):
         self.assertEqual(task_dict['headers'], headers_data)
         self.assertEqual(task_dict['total_num'], 50)
         self.assertEqual(task_dict['timeout'], 45)
-        self.assertEqual(task_dict['status'], "pending")
+        self.assertEqual(task_dict['visited_num'], 0)
         
         # 验证时间戳格式
         self.assertIsInstance(task_dict['created_at'], str)
@@ -296,7 +280,7 @@ class TestTaskModel(unittest.TestCase):
         self.assertIn("Task(", repr_str)
         self.assertIn(f"id={task.id}", repr_str)
         self.assertIn("url='https://example.com'", repr_str)
-        self.assertIn("status='running'", repr_str)
+        self.assertIn("completion_rate=0.00", repr_str)
     
     def test_headers_json_field(self) -> None:
         """测试headers JSON字段"""
