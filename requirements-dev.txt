@@ -1,0 +1,24 @@
+# Development Dependencies for Address Crawler
+# 开发环境依赖文件
+# 
+# 安装方法: pip install -r requirements-dev.txt
+#
+# 开发工具说明:
+# - pytest: 单元测试框架
+# - pytest-cov: 代码覆盖率测试
+# - black: 代码格式化工具
+# - flake8: 代码质量检查
+# - mypy: 静态类型检查
+# - pre-commit: Git提交钩子管理
+
+# Testing Framework
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Code Formatting and Linting
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# Git Hooks
+pre-commit>=3.4.0

@@ -1,0 +1,33 @@
+# Address Crawler Project Requirements
+# 项目依赖备份文件
+# 创建时间: 2025-09-10
+# 
+# 安装方法:
+# 1. 基础安装: pip install -r requirements.txt
+# 2. 开发环境安装: pip install -r requirements.txt -r requirements-dev.txt
+# 3. 一键安装所有依赖: pip install -r requirements.txt && pip install -r requirements-dev.txt
+#
+# 替代安装方法:
+# - 使用pipenv: pipenv install -r requirements.txt
+# - 使用poetry: poetry add $(cat requirements.txt | grep -v "^#" | grep -v "^$")
+# - 使用conda: conda install --yes --file requirements.txt
+# - 使用setup.py: python setup.py install (如果有setup.py文件)
+#
+# 开发依赖说明:
+# 开发依赖已分离到 requirements-dev.txt 文件中，包含测试、代码格式化等工具
+# 建议开发环境同时安装两个文件中的所有依赖
+
+# Web Framework
+Flask>=2.3.0
+
+# Database
+SQLAlchemy>=2.0.0
+
+# Task Scheduling
+APScheduler>=3.10.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Environment Configuration
+python-dotenv>=1.0.0
