@@ -386,6 +386,8 @@ class TaskScheduler:
         self._job_execution_times: Dict[str, float] = {}
         self._auto_execution_job_id: Optional[str] = None  # 自动执行任务的作业ID
         self._app = app  # Flask应用实例
+        self._last_all_completed_report_time: Optional[datetime] = None  # 记录上次所有任务完成时打印统计报告的时间
+        self._crawler_service: Optional[CrawlerService] = None  # 复用的爬虫服务实例
         
         self.logger.info("开始初始化任务调度器")
         self._initialize_scheduler()
@@ -601,6 +603,12 @@ class TaskScheduler:
             
             # 停止自动任务执行
             self.stop_auto_execution()
+            
+            # 关闭爬虫服务
+            if self._crawler_service:
+                self._crawler_service.close()
+                self._crawler_service = None
+                self.logger.info("爬虫服务已关闭")
             
             return True
             
@@ -842,8 +850,8 @@ class TaskScheduler:
                 self.logger.info(f"作业执行成功: {event.job_id} - {job_name or '未命名'} - "
                                f"执行耗时: {execution_time_ms:.2f}ms")
             
-            # 每10次成功执行记录一次统计报告
-            if self._statistics.success_count % 10 == 0:
+            # 每200次成功执行记录一次统计报告
+            if self._statistics.success_count % 200 == 0:
                 self.log_statistics_report()
                 self.log_performance_report()
                 
@@ -884,8 +892,8 @@ class TaskScheduler:
                 f"追踪: {event.traceback}"
             )
             
-            # 每5次失败执行记录一次统计报告
-            if self._statistics.failure_count % 5 == 0:
+            # 每10次失败执行记录一次统计报告
+            if self._statistics.failure_count % 10 == 0:
                 self.log_statistics_report()
                 self.log_performance_report()
                 
@@ -1101,7 +1109,6 @@ class TaskScheduler:
         executed_count = 0
         success_count = 0
         failure_count = 0
-        start_time = datetime.now()
         
         self.logger.info("开始执行待处理任务扫描...")
         
@@ -1110,19 +1117,19 @@ class TaskScheduler:
             if self._app:
                 # 如果提供了应用实例，使用它
                 with self._app.app_context():
-                    return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
+                    return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, datetime.now())
             else:
                 # 尝试获取当前应用上下文，如果没有则创建新的
                 try:
                     from flask import current_app
                     if current_app:
-                        return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
+                        return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, datetime.now())
                     else:
                         # 创建临时应用上下文
                         from src.app import create_app
                         app = create_app()
                         with app.app_context():
-                            return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
+                            return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, datetime.now())
                 except RuntimeError:
                     # 没有应用上下文，创建新的
                     from src.app import create_app
@@ -1131,8 +1138,6 @@ class TaskScheduler:
                         return self._execute_pending_tasks_internal(executed_count, success_count, failure_count, start_time)
         except Exception as e:
             self.logger.error(f"执行待处理任务时发生错误: {e}")
-            execution_time = datetime.now() - start_time
-            self.logger.error(f"执行失败，已运行时间: {execution_time}")
             return executed_count
     
     def _execute_pending_tasks_internal(self, executed_count: int, success_count: int, failure_count: int, start_time: datetime) -> int:
@@ -1158,6 +1163,36 @@ class TaskScheduler:
         
         if not pending_tasks:
             self.logger.info("没有待执行的任务")
+            
+            # 检查是否所有任务都已完成，如果是则打印最终统计报告
+            try:
+                from src.app import db
+                all_tasks = db.session.query(Task).filter(Task.total_num > 0).all()
+                completed_tasks = [task for task in all_tasks if task.is_completed]
+                pending_tasks_total = [task for task in all_tasks if task.is_pending]
+                
+                if all_tasks and len(pending_tasks_total) == 0:
+                    # 检查距离上次打印统计报告是否超过5分钟，避免频繁打印
+                    current_time = datetime.now()
+                    should_report = (
+                        self._last_all_completed_report_time is None or
+                        (current_time - self._last_all_completed_report_time).total_seconds() > 300
+                    )
+                    
+                    if should_report:
+                        self.logger.info(f"🎉 所有 {len(all_tasks)} 个任务已完成！")
+                        self.logger.info(f"已完成任务: {len(completed_tasks)} 个")
+                        self.log_statistics_report()
+                        self._last_all_completed_report_time = current_time
+                    else:
+                        self.logger.info(f"所有 {len(all_tasks)} 个任务已完成 (上次报告时间: {self._last_all_completed_report_time.strftime('%H:%M:%S')})")
+                elif all_tasks:
+                    self.logger.info(f"任务状态总览: 总计 {len(all_tasks)} 个任务, "
+                                   f"已完成 {len(completed_tasks)} 个, "
+                                   f"待执行 {len(pending_tasks_total)} 个")
+            except Exception as e:
+                self.logger.error(f"检查任务完成状态时发生错误: {e}")
+            
             return 0
         
         self.logger.info(f"发现 {len(pending_tasks)} 个待执行任务")
@@ -1170,69 +1205,68 @@ class TaskScheduler:
         if len(pending_tasks) > 10:
             self.logger.info(f"  ... 还有 {len(pending_tasks) - 10} 个任务待执行")
         
-        # 初始化爬虫服务
-        crawler_service = CrawlerService()
+        # 使用复用的爬虫服务实例，如果没有则创建
+        if self._crawler_service is None:
+            self._crawler_service = CrawlerService()
+            self.logger.info("创建新的爬虫服务实例")
         
-        for task in pending_tasks:
-            try:
-                # 任务开始执行，无需状态更新
-                self.logger.debug(f"任务开始执行: {task.id} - {task.url}")
-                db.session.commit()
-                
-                self.logger.info(f"开始执行任务: {task.id} - {task.url}")
-                
-                # 执行爬虫任务并保存结果
-                # 使用Task模型的完整HTTP配置
-                result = crawler_service.crawl_and_save(
-                    task.url,
-                    method=task.method,
-                    body=task.body,
-                    headers=task.headers,
-                    timeout=task.timeout,
-                    retry_count=task.retry_count
-                )
-                
-                # 更新任务统计信息
-                if result['status'] == 'success':
-                    task.increment_visited()
-                    success_count += 1
-                    self._statistics.record_success(f"task_{task.id}", task.url)
-                    self.logger.info(f"任务执行成功: {task.id} (进度: {task.visited_num}/{task.total_num})")
-                else:
+        crawler_service = self._crawler_service
+        
+        try:
+            for task in pending_tasks:
+                try:
+                    # 任务开始执行，无需状态更新
+                    self.logger.debug(f"任务开始执行: {task.id} - {task.url}")
+                    db.session.commit()
+                    
+                    self.logger.info(f"开始执行任务: {task.id} - {task.url}")
+                    
+                    # 执行爬虫任务并保存结果
+                    # 使用Task模型的完整HTTP配置
+                    result = crawler_service.crawl_and_save(
+                        task.url,
+                        method=task.method,
+                        body=task.body,
+                        headers=task.headers,
+                        timeout=task.timeout,
+                        retry_count=task.retry_count
+                    )
+                    
+                    # 更新任务统计信息
+                    if result['status'] == 'success':
+                        task.increment_visited()
+                        success_count += 1
+                        self._statistics.record_success(f"task_{task.id}", task.url)
+                        self.logger.info(f"任务执行成功: {task.id} (进度: {task.visited_num}/{task.total_num})")
+                        
+                        # 检查任务是否真正完成
+                        if task.is_completed:
+                            self.logger.info(f"任务 {task.id} 已完成！总进度: {task.visited_num}/{task.total_num}")
+                            self.log_statistics_report()
+                    else:
+                        
+                        task.increment_retry()
+                        failure_count += 1
+                        error_msg = result.get('error', '未知错误')
+                        self._statistics.record_failure(f"task_{task.id}", task.url, error_msg)
+                        self.logger.warning(f"任务执行失败: {task.id}, 原因: {error_msg}")
+                    
+                    db.session.commit()
+                    executed_count += 1
+                    
+                except Exception as e:
+                    self.logger.error(f"执行任务 {task.id} 时发生错误: {e}")
                     
                     task.increment_retry()
                     failure_count += 1
-                    error_msg = result.get('error', '未知错误')
-                    self._statistics.record_failure(f"task_{task.id}", task.url, error_msg)
-                    self.logger.warning(f"任务执行失败: {task.id}, 原因: {error_msg}")
-                
-                db.session.commit()
-                executed_count += 1
-                
-            except Exception as e:
-                self.logger.error(f"执行任务 {task.id} 时发生错误: {e}")
-                
-                task.increment_retry()
-                failure_count += 1
-                self._statistics.record_failure(f"task_{task.id}", task.url, str(e))
-                db.session.commit()
-                continue
+                    self._statistics.record_failure(f"task_{task.id}", task.url, str(e))
+                    db.session.commit()
+                    continue
+        except Exception as e:
+            # 批量任务处理过程中出现异常，不需要关闭爬虫服务
+            self.logger.error(f"批量任务执行过程中出现异常: {e}")
         
-        crawler_service.close()
-        
-        # 记录详细的执行统计摘要
-        execution_time = datetime.now() - start_time
-        self.logger.info("任务执行扫描完成")
-        self.logger.info(f"执行统计摘要:")
-        self.logger.info(f"  - 总计执行: {executed_count} 个任务")
-        self.logger.info(f"  - 成功: {success_count} 个")
-        self.logger.info(f"  - 失败: {failure_count} 个")
-        self.logger.info(f"  - 执行耗时: {execution_time}")
-        self.logger.info(f"  - 平均执行时间: {execution_time / executed_count if executed_count > 0 else 0}")
-        
-        # 每执行完一批任务记录统计报告
-        if executed_count > 0:
-            self.log_statistics_report()
+        # 不再在这里关闭爬虫服务，保持实例复用
         
         return executed_count
 

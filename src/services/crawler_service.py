@@ -7,10 +7,12 @@
 
 import json
 import logging
+import random
 import time
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
+from pytz import country_names
 import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +21,54 @@ from src.app import db
 from src.config import get_config
 from src.models.address_info import AddressInfo
 from src.utils.logger import get_logger
+
+
+class UserAgentPool:
+    """
+    User-Agent池管理类
+    
+    提供随机User-Agent选择功能，避免使用单一User-Agent被目标网站封禁。
+    预置10个常见浏览器的User-Agent字符串。
+    """
+    
+    def __init__(self) -> None:
+        """初始化User-Agent池"""
+        self.user_agents = [
+            # Chrome
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            
+            # Firefox
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0',
+            
+            # Safari
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+            
+            # Edge
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+        ]
+    
+    def get_random_user_agent(self) -> str:
+        """
+        从User-Agent池中随机选择一个User-Agent
+        
+        Returns:
+            str: 随机选择的User-Agent字符串
+        """
+        return random.choice(self.user_agents)
+    
+    def get_all_user_agents(self) -> List[str]:
+        """
+        获取所有可用的User-Agent列表
+        
+        Returns:
+            List[str]: User-Agent字符串列表
+        """
+        return self.user_agents.copy()
 
 
 class CrawlerService:
@@ -34,11 +84,12 @@ class CrawlerService:
         self.logger = get_logger(__name__)
         self.config = get_config()
         self.session = requests.Session()
+        self.user_agent_pool = UserAgentPool()
         
         # 配置会话
         self.session.timeout = self.config.CRAWLER_TIMEOUT
         self.session.headers.update({
-            'User-Agent': 'AddressCrawler/1.0',
+            'User-Agent': self.user_agent_pool.get_random_user_agent(),
             'Accept': 'application/json',
             'Content-Type': 'application/json'
         })
@@ -80,19 +131,35 @@ class CrawlerService:
         # 添加自定义headers
         if headers:
             request_kwargs['headers'] = headers
+        else:
+            request_kwargs['headers'] = {}
+        
+        # 设置随机User-Agent
+        request_kwargs['headers']['User-Agent'] = self.user_agent_pool.get_random_user_agent()
+        
+        # 添加其他默认headers
+        request_kwargs['headers'].setdefault('Accept', 'application/json')
+        request_kwargs['headers'].setdefault('Content-Type', 'application/json')
         
         # 添加body（主要用于POST/PUT请求）
         if body and method.upper() != 'GET':
             request_kwargs['data'] = body
-        
+
         self.logger.info(f"开始爬取URL: {target_url}")
         self.logger.info(f"HTTP方法: {method}")
+        self.logger.info(f"使用User-Agent: {request_kwargs['headers']['User-Agent']}")
         
         # 重试机制
         retry_count = kwargs.get('retry_count', self.config.CRAWLER_RETRY_COUNT)
         for attempt in range(retry_count):
             try:
                 self.logger.debug(f"尝试第 {attempt + 1} 次请求")
+                
+                # 每次重试使用新的User-Agent
+                if attempt > 0:
+                    request_kwargs['headers']['User-Agent'] = self.user_agent_pool.get_random_user_agent()
+                    self.logger.info(f"重试使用新的User-Agent: {request_kwargs['headers']['User-Agent']}")
+                
                 # 根据method选择请求方式
                 if method.upper() == 'GET':
                     response = self.session.get(target_url, **request_kwargs)
@@ -259,7 +326,7 @@ class CrawlerService:
             # 尝试解析JSON响应
             response_data = response.json()
             address_data = response_data.get("address", {});
-            self.logger.debug(f"API响应数据: {response_data}")
+            # self.logger.debug(f"API响应数据: {response_data}")
             
             # 提取地址信息
             # address_info = self._extract_address_info(response_data, url)
@@ -325,7 +392,18 @@ class CrawlerService:
             if not isinstance(data, AddressInfo):
                 self.logger.warning("数据格式不正确，无法保存")
                 return None
+            
+            # 检查是否存在相同的city和address组合
+            if data.city and data.address:
+                existing_record = db.session.query(AddressInfo).filter(
+                    AddressInfo.city == data.city,
+                    AddressInfo.address == data.address
+                ).first()
                 
+                if existing_record:
+                    self.logger.info(f"发现重复地址记录，跳过保存: {data.city} - {data.address}")
+                    return existing_record
+            
             # 保存到数据库
             db.session.add(data)
             db.session.commit()
@@ -368,7 +446,12 @@ class CrawlerService:
         """
         # 爬取地址
         crawl_result = self.crawl_address(address, method, body, headers, **kwargs)
-        
+        country = json.loads(body).get("path", "")
+        if country == "/":
+            crawl_result['data'].country = 'us'
+        else:
+            country = country.replace("/", "").replace("-address", "");
+            crawl_result['data'].country = country
         # 如果爬取成功，保存结果
         if crawl_result['status'] == 'success':
             saved_info = self.save_address_info(crawl_result)

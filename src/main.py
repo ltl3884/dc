@@ -17,6 +17,10 @@ import signal
 import atexit
 from typing import Optional
 
+# 设置PyMySQL作为MySQLdb模块的别名
+import pymysql
+pymysql.install_as_MySQLdb()
+
 from src.app import create_app
 from src.scheduler.task_scheduler import get_scheduler, start_scheduler, stop_scheduler
 from src.utils.logger import get_logger
