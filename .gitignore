@@ -100,7 +100,7 @@ instance/
 .webassets-cache
 
 # Configuration files with sensitive data
-config.py
+# config.py
 settings.py
 *.key
 *.pem
